@@ -305,7 +305,7 @@
 </script>
 
 <svelte:head>
-  <title>Daylist — a little more focused</title>
+  <title>Kent — A personal Todo list</title>
 </svelte:head>
 
 <svelte:window onkeydown={handleWindowKeydown} />
@@ -313,9 +313,8 @@
 <div class="page-backdrop theme-{theme}">
   <div class="app-shell">
     <aside class="sidebar">
-      <a class="brand" href="#home" aria-label="Daylist home">
-        <span class="brand-mark"><span></span><span></span><span></span></span>
-        <span>daylist<span class="brand-period">.</span></span>
+      <a class="brand" href="#home" aria-label="Kent To-do List home">
+        <img src="/assets/kent-todo-logo.jpg" alt="Kent — A personal Todo list" />
       </a>
 
       <div class="menu-heading"><span>MENU</span><span class="menu-mark">☰</span></div>
