@@ -1,5 +1,7 @@
 <script>
   import { onMount, tick } from 'svelte';
+  import { supabaseConfigured, supabaseConfigurationError } from './lib/supabase.js';
+  import { loadTasksFromStore, syncTasksToStore } from './lib/task-storage.js';
 
   const storageKey = 'daylist-tasks-v1';
   const noteColors = ['yellow', 'mint', 'rose', 'peach', 'sky', 'lilac'];
@@ -37,8 +39,16 @@
   let reminderPermission = $state('unsupported');
   let reminderQueue = $state([]);
   let currentTime = $state(Date.now());
+  let cloudStatus = $state('connecting');
+  let storageMode = $state(supabaseConfigured ? 'supabase' : 'local-api');
+  let storeSession = null;
+  let cloudReady = false;
+  let syncedTaskIds = new Set();
+  let syncQueue = Promise.resolve();
+  let syncTimer;
 
   onMount(() => {
+    let active = true;
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
       if (Array.isArray(saved)) {
@@ -68,12 +78,59 @@
       currentTime = Date.now();
       checkReminders();
     }, 15000);
-    return () => window.clearInterval(timer);
+
+    async function initialize() {
+      if (supabaseConfigurationError) {
+        console.warn(`${supabaseConfigurationError} Continuing with the local API.`);
+      }
+      try {
+        const store = await loadTasksFromStore();
+        if (!active) return;
+        storageMode = store.mode;
+        storeSession = { mode: store.mode, userId: store.userId };
+        if (store.tasks.length) {
+          tasks = store.tasks;
+          syncedTaskIds = new Set(store.tasks.map((task) => task.id));
+        } else if (tasks.length) {
+          // Copy existing browser tasks into the selected database when it is empty.
+          syncedTaskIds = await syncTasksToStore(tasks, storeSession, syncedTaskIds);
+        }
+        cloudReady = true;
+        cloudStatus = 'synced';
+        checkReminders();
+      } catch (error) {
+        console.error('Task storage could not be initialized; using local storage.', error);
+        cloudStatus = 'error';
+      }
+    }
+
+    initialize();
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.clearTimeout(syncTimer);
+    };
   });
 
   $effect(() => {
     if (ready) {
+      const snapshot = tasks.map((task) => ({ ...task }));
       try { localStorage.setItem(storageKey, JSON.stringify(tasks)); } catch { /* Storage may be unavailable. */ }
+      if (cloudReady) {
+        window.clearTimeout(syncTimer);
+        syncTimer = window.setTimeout(() => {
+          syncQueue = syncQueue.then(async () => {
+            cloudStatus = 'syncing';
+            try {
+              syncedTaskIds = await syncTasksToStore(snapshot, storeSession, syncedTaskIds);
+              cloudStatus = 'synced';
+            } catch (error) {
+              console.error('Task database sync failed.', error);
+              cloudStatus = 'error';
+            }
+          });
+        }, 250);
+      }
     }
   });
 
@@ -101,6 +158,8 @@
   let missedCount = $derived(tasks.filter(isMissed).length);
   let calendarMonthLabel = $derived(new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(calendarMonth));
   let calendarDays = $derived(makeCalendarDays(calendarMonth));
+
+  let cloudStatusLabel = $derived(cloudStatus === 'connecting' ? (storageMode === 'supabase' ? 'Connecting to Supabase' : 'Connecting to local API') : cloudStatus === 'syncing' ? 'Saving' : cloudStatus === 'synced' ? (storageMode === 'supabase' ? 'Saved to Supabase' : 'Database connected') : storageMode === 'supabase' ? 'Cloud unavailable' : 'Database unavailable');
 
   function saveNote(event) {
     event.preventDefault();
@@ -288,8 +347,9 @@
     const dueNow = tasks.filter((task) => !task.done && !task.reminded && task.dueAt && Number.isFinite(new Date(task.dueAt).getTime()) && new Date(task.dueAt).getTime() <= now);
     if (!dueNow.length) return;
     const ids = new Set(dueNow.map((task) => task.id));
+    const queuedIds = new Set(reminderQueue.map((task) => task.id));
     tasks = tasks.map((task) => ids.has(task.id) ? { ...task, reminded: true } : task);
-    reminderQueue = [...reminderQueue, ...dueNow];
+    reminderQueue = [...reminderQueue, ...dueNow.filter((task) => !queuedIds.has(task.id))];
     if (reminderPermission === 'granted' && 'Notification' in window) {
       dueNow.forEach((task) => {
         const notification = new Notification('Task due now', { body: task.title, tag: `daylist-${task.id}` });
@@ -317,33 +377,33 @@
         <img src="/assets/kent-todo-logo.jpg" alt="Kent — A personal Todo list" />
       </a>
 
-      <div class="menu-heading"><span>MENU</span><span class="menu-mark">☰</span></div>
-      <label class="search-box"><span>⌕</span><input aria-label="Search tasks" bind:value={searchQuery} placeholder="Search" /></label>
+      <div class="menu-heading"><span>MENU</span><span class="menu-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /></svg></span></div>
+      <label class="search-box"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3" /><path d="m16 16 4 4" /></svg><input aria-label="Search tasks" bind:value={searchQuery} placeholder="Search tasks" /></label>
 
       <div class="side-label">TASKS</div>
       <nav class="nav-group" aria-label="Task views">
         <button class="nav-item" class:selected={filter === 'upcoming'} aria-current={filter === 'upcoming' ? 'page' : undefined} onclick={() => filter = 'upcoming'}>
-          <span class="nav-icon">»</span><span>Upcoming</span><span class="nav-count">{upcomingCount}</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5" /><path d="M7.5 3.5v3M16.5 3.5v3M3.5 9.5h17M12 12.5v3l2 1.2" /><circle class="clock-face" cx="12" cy="15" r="5.5" /></svg></span><span>Upcoming</span><span class="nav-count">{upcomingCount}</span>
         </button>
         <button class="nav-item" class:selected={filter === 'today'} aria-current={filter === 'today' ? 'page' : undefined} onclick={() => filter = 'today'}>
-          <span class="nav-icon">▦</span><span>Today</span><span class="nav-count">{todayCount}</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5" /><path d="M7.5 3.5v3M16.5 3.5v3M3.5 9.5h17M8 13h.01M12 13h.01M16 13h.01M8 16.5h.01M12 16.5h.01" /></svg></span><span>Today</span><span class="nav-count">{todayCount}</span>
         </button>
         <button class="nav-item" class:selected={filter === 'missed'} aria-current={filter === 'missed' ? 'page' : undefined} onclick={() => filter = 'missed'}>
-          <span class="nav-icon">!</span><span>Missed</span><span class="nav-count">{missedCount}</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 21 19a1.3 1.3 0 0 1-1.1 2H4.1A1.3 1.3 0 0 1 3 19l9-15.5Z" /><path d="M12 9v4.5M12 17h.01" /></svg></span><span>Missed</span><span class="nav-count">{missedCount}</span>
         </button>
         <button class="nav-item" class:selected={filter === 'completed'} aria-current={filter === 'completed' ? 'page' : undefined} onclick={() => filter = 'completed'}>
-          <span class="nav-icon">✓</span><span>Completed</span><span class="nav-count">{completed}</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="m8.5 12.2 2.2 2.2 4.8-5" /></svg></span><span>Completed</span><span class="nav-count">{completed}</span>
         </button>
       </nav>
 
       <div class="side-label lists-label">VIEWS</div>
       <button class="nav-item" class:selected={filter === 'wall'} aria-current={filter === 'wall' ? 'page' : undefined} onclick={() => filter = 'wall'}>
-        <span class="nav-icon">▤</span><span>To-do List</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 5h11M9 12h11M9 19h11" /><path d="m3.5 5 .8.8L6 4M3.5 12l.8.8L6 11M3.5 19l.8.8L6 18" /></svg></span><span>To-do List</span>
       </button>
 
       <div class="side-label appearance-label">APPEARANCE</div>
       <button class="nav-item theme-nav-item" aria-expanded={themePickerOpen} aria-controls="workspace-theme-picker" onclick={() => themePickerOpen = !themePickerOpen}>
-        <span class="nav-icon">◉</span><span>Theme</span><span class="theme-preview" style={`--swatch: ${selectedTheme.preview}`}></span><span class="theme-chevron">{themePickerOpen ? '⌃' : '⌄'}</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5" /><path d="M12 2.8v2M12 19.2v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M2.8 12h2m14.4 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4" /></svg></span><span>Theme</span><span class="theme-preview" style={`--swatch: ${selectedTheme.preview}`}></span><span class="theme-chevron">{themePickerOpen ? '⌃' : '⌄'}</span>
       </button>
       {#if themePickerOpen}
         <div class="theme-picker" id="workspace-theme-picker" role="group" aria-label="Choose workspace theme color">
@@ -370,6 +430,9 @@
       <header class="topbar">
         <div class="breadcrumb">MY SPACE <span>/</span> <strong>{filter === 'wall' ? 'TO-DO LIST' : filter === 'today' ? 'TODAY' : filter === 'upcoming' ? 'UPCOMING' : filter === 'missed' ? 'MISSED' : 'COMPLETED'}</strong></div>
         <div class="top-actions">
+          <span class="cloud-status" class:cloud-error={cloudStatus === 'error'} class:cloud-local={cloudStatus === 'local'} aria-live="polite" title={cloudStatus === 'error' ? (supabaseConfigurationError || (storageMode === 'supabase' ? 'Check Supabase configuration and connection.' : 'Start the local Database, Backend, and API services.')) : 'Task storage status'}>
+            <span class="cloud-status-dot"></span>{cloudStatusLabel}
+          </span>
           {#if reminderPermission === 'granted'}
             <span class="reminder-status enabled" title="Browser reminders are enabled">◉ <span>Reminders on</span></span>
           {:else if reminderPermission === 'denied'}
@@ -448,9 +511,14 @@
             {#if datePickerOpen}
               <div class="calendar-popover" aria-label="Choose due date and time">
                 <div class="calendar-header">
-                  <button type="button" aria-label="Previous month" onclick={() => setCalendarMonth(-1)}>‹</button>
-                  <strong>{calendarMonthLabel}</strong>
-                  <button type="button" aria-label="Next month" onclick={() => setCalendarMonth(1)}>›</button>
+                  <div class="calendar-month-copy">
+                    <span>SELECT A DATE</span>
+                    <strong>{calendarMonthLabel}</strong>
+                  </div>
+                  <div class="calendar-navigation">
+                    <button type="button" aria-label="Previous month" onclick={() => setCalendarMonth(-1)}>‹</button>
+                    <button type="button" aria-label="Next month" onclick={() => setCalendarMonth(1)}>›</button>
+                  </div>
                 </div>
                 <div class="picker-layout">
                   <div class="calendar-section">
@@ -463,10 +531,16 @@
                     <div class="calendar-quick-actions"><button type="button" onclick={() => setQuickDate(0)}>Today</button><button type="button" onclick={() => setQuickDate(1)}>Tomorrow</button><button type="button" onclick={clearPickerDate}>Clear</button></div>
                   </div>
                   <div class="time-section">
-                    <span class="picker-section-label">TIME</span>
-                    <label><span>Hour</span><select aria-label="Hour" value={timeHour} onchange={(event) => updatePickerTime('hour', event.currentTarget.value)}>{#each hours as hour}<option value={hour}>{hour}</option>{/each}</select></label>
-                    <label><span>Minute</span><select aria-label="Minute" value={timeMinute} onchange={(event) => updatePickerTime('minute', event.currentTarget.value)}>{#each minutes as minute}<option value={minute}>{minute}</option>{/each}</select></label>
-                    <label><span>Period</span><select aria-label="AM or PM" value={timePeriod} onchange={(event) => updatePickerTime('period', event.currentTarget.value)}><option value="AM">AM</option><option value="PM">PM</option></select></label>
+                    <div class="time-heading">
+                      <div><span class="picker-section-label">SELECT TIME</span><strong class="time-preview">{timeHour}:{timeMinute}<span>{timePeriod}</span></strong></div>
+                      <span class="time-clock" aria-hidden="true">◷</span>
+                    </div>
+                    <div class="time-field-grid">
+                      <label><span>Hour</span><select aria-label="Hour" value={timeHour} onchange={(event) => updatePickerTime('hour', event.currentTarget.value)}>{#each hours as hour}<option value={hour}>{hour}</option>{/each}</select></label>
+                      <label><span>Minute</span><select aria-label="Minute" value={timeMinute} onchange={(event) => updatePickerTime('minute', event.currentTarget.value)}>{#each minutes as minute}<option value={minute}>{minute}</option>{/each}</select></label>
+                      <label><span>Period</span><select aria-label="AM or PM" value={timePeriod} onchange={(event) => updatePickerTime('period', event.currentTarget.value)}><option value="AM">AM</option><option value="PM">PM</option></select></label>
+                    </div>
+                    <p class="time-hint">Uses your local time</p>
                   </div>
                 </div>
               </div>

@@ -1,0 +1,43 @@
+{
+  "services": [
+    {
+      "id": "database",
+      "name": "Database",
+      "description": "Local PostgreSQL database managed by Docker Compose.",
+      "cwd": "..",
+      "command": ["docker", "compose", "up", "db"],
+      "stop_command": ["docker", "compose", "stop", "--timeout", "8", "db"],
+      "port": 5432,
+      "env": {"POSTGRES_DB": "daylist", "POSTGRES_USER": "daylist", "POSTGRES_PASSWORD": "daylist_local_dev_only"}
+    },
+    {
+      "id": "backend",
+      "name": "Backend",
+      "description": "Task persistence and business logic backed by PostgreSQL.",
+      "cwd": "..",
+      "command": ["{python}", "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"],
+      "port": 8000,
+      "env": {"DATABASE_URL": "postgresql://daylist:daylist_local_dev_only@127.0.0.1:5432/daylist"}
+    },
+    {
+      "id": "api",
+      "name": "API",
+      "description": "Frontend-facing HTTP API gateway to the backend service.",
+      "cwd": "..",
+      "command": ["{python}", "-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", "8001"],
+      "port": 8001,
+      "env": {"BACKEND_URL": "http://127.0.0.1:8000"}
+    },
+    {
+      "id": "frontend",
+      "name": "Frontend",
+      "description": "This repository's Svelte/Vite development server.",
+      "cwd": "..",
+      "command": ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--strictPort"],
+      "windows_command": ["cmd.exe", "/d", "/s", "/c", "npm run dev -- --host 127.0.0.1 --strictPort"],
+      "port": 5173,
+      "url": "http://127.0.0.1:5173",
+      "env": {}
+    }
+  ]
+}
