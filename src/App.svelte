@@ -40,6 +40,7 @@
   let reminderQueue = $state([]);
   let currentTime = $state(Date.now());
   let cloudStatus = $state('connecting');
+  let cloudError = $state('');
   let storageMode = $state(supabaseConfigured ? 'supabase' : 'local-api');
   let storeSession = null;
   let cloudReady = false;
@@ -97,9 +98,11 @@
         }
         cloudReady = true;
         cloudStatus = 'synced';
+        cloudError = '';
         checkReminders();
       } catch (error) {
         console.error('Task storage could not be initialized; using local storage.', error);
+        cloudError = describeStorageError(error);
         cloudStatus = 'error';
       }
     }
@@ -124,8 +127,10 @@
             try {
               syncedTaskIds = await syncTasksToStore(snapshot, storeSession, syncedTaskIds);
               cloudStatus = 'synced';
+              cloudError = '';
             } catch (error) {
               console.error('Task database sync failed.', error);
+              cloudError = describeStorageError(error);
               cloudStatus = 'error';
             }
           });
@@ -160,6 +165,21 @@
   let calendarDays = $derived(makeCalendarDays(calendarMonth));
 
   let cloudStatusLabel = $derived(cloudStatus === 'connecting' ? (storageMode === 'supabase' ? 'Connecting to Supabase' : 'Connecting to local API') : cloudStatus === 'syncing' ? 'Saving' : cloudStatus === 'synced' ? (storageMode === 'supabase' ? 'Saved to Supabase' : 'Database connected') : storageMode === 'supabase' ? 'Cloud unavailable' : 'Database unavailable');
+
+  function describeStorageError(error) {
+    const message = [error?.message, error?.details, error?.hint].filter(Boolean).join(' ');
+    const lowerMessage = message.toLowerCase();
+    if (/null value in column ["']?user_id["']? of relation ["']?tasks["']? violates not-null/.test(lowerMessage)) {
+      return `Your Supabase tasks table still has a required legacy user_id column. Run the updated supabase/schema.sql to migrate it, then reload. ${message}`;
+    }
+    if (error?.code === '42703' || error?.code === 'PGRST204' || /column .* does not exist|could not find .* column/.test(lowerMessage)) {
+      return `Supabase schema is missing a column. Run the updated supabase/schema.sql in the SQL Editor, then reload. ${message}`;
+    }
+    if (/anonymous.*(disabled|not enabled)|signups.*disabled/.test(lowerMessage)) {
+      return `Enable Anonymous Sign-Ins in Supabase Authentication settings, then reload. ${message}`;
+    }
+    return `Supabase connection failed. Check the project URL and publishable key, confirm Anonymous Sign-Ins are enabled, and run supabase/schema.sql. ${message || 'No error details were returned.'}`;
+  }
 
   function saveNote(event) {
     event.preventDefault();
@@ -430,7 +450,7 @@
       <header class="topbar">
         <div class="breadcrumb">MY SPACE <span>/</span> <strong>{filter === 'wall' ? 'TO-DO LIST' : filter === 'today' ? 'TODAY' : filter === 'upcoming' ? 'UPCOMING' : filter === 'missed' ? 'MISSED' : 'COMPLETED'}</strong></div>
         <div class="top-actions">
-          <span class="cloud-status" class:cloud-error={cloudStatus === 'error'} class:cloud-local={cloudStatus === 'local'} aria-live="polite" title={cloudStatus === 'error' ? (supabaseConfigurationError || (storageMode === 'supabase' ? 'Check Supabase configuration and connection.' : 'Start the local Database, Backend, and API services.')) : 'Task storage status'}>
+          <span class="cloud-status" class:cloud-error={cloudStatus === 'error'} class:cloud-local={cloudStatus === 'local'} aria-live="polite" aria-label={cloudStatus === 'error' ? cloudError : cloudStatusLabel} title={cloudStatus === 'error' ? (cloudError || supabaseConfigurationError || 'Check Supabase configuration and connection.') : 'Task storage status'}>
             <span class="cloud-status-dot"></span>{cloudStatusLabel}
           </span>
           {#if reminderPermission === 'granted'}
